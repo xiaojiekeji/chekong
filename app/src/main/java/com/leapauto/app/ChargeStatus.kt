@@ -1,0 +1,203 @@
+package com.leapauto.app
+
+import java.util.Locale
+import kotlin.math.abs
+import org.json.JSONObject
+
+/** Shared formatting and interpretation for the verified charging signals. */
+object ChargeStatus {
+    enum class PresentationState { CHARGING, FULL, STOPPED, SCHEDULED, FAULT, IDLE, UNKNOWN }
+
+    data class Presentation(
+        val state: PresentationState,
+        val label: String,
+        val remainingTime: String? = null
+    )
+
+    /** Uses the existing SOC parser without rounding a sub-100 value up to full. */
+    fun socPercent(value: Any?): Int? {
+        val raw = value?.toString()?.trim()?.removeSuffix("%")?.trim() ?: return null
+        val numeric = raw.toDoubleOrNull()?.takeIf { it.isFinite() && it in 0.0..100.0 } ?: return null
+        return BatteryPreheatGatePolicy.parseSocPercent(numeric.toString())
+    }
+
+    /** Client display policy; completion of a charging session does not imply a full battery. */
+    fun presentation(state: Int?, soc: Int?, remainingTime: String? = null): Presentation = when (state) {
+        1 -> Presentation(
+            PresentationState.CHARGING,
+            "充电中",
+            remainingMinutes(remainingTime)?.takeIf { it > 0 }?.let(::formatMinutes)
+        )
+        2, 6 -> if (soc == 100) Presentation(PresentationState.FULL, "已充满")
+            else Presentation(PresentationState.STOPPED, "充电已停止")
+        4 -> Presentation(PresentationState.SCHEDULED, "预约充电等待")
+        3 -> Presentation(PresentationState.FAULT, "充电故障")
+        0 -> Presentation(PresentationState.IDLE, "未充电")
+        else -> Presentation(PresentationState.UNKNOWN, "充电状态未知")
+    }
+
+    fun state(status: JSONObject): Int? = state(status.opt("chargeState"))
+
+    fun state(values: Map<String, Any?>): Int? = state(values["chargeState"])
+
+    fun label(state: Int?): String = when (state) {
+        0 -> "未插枪"
+        1 -> "充电中"
+        2 -> "充电完成"
+        3 -> "充电故障"
+        4 -> "预约充电等待"
+        6 -> "充电暂停"
+        else -> "充电状态未知"
+    }
+
+    fun power(status: JSONObject): String? {
+        return power(state(status), status.opt("batteryVoltage"), status.opt("batteryCurrent"))
+    }
+
+    fun power(values: Map<String, Any?>): String? =
+        power(state(values), values["batteryVoltage"], values["batteryCurrent"])
+
+    /** Returns the absolute battery electrical power for charging or driving displays. */
+    fun electricalPower(voltageValue: Any?, currentValue: Any?): String? {
+        val voltage = electricalValue(voltageValue, "V") ?: return null
+        val current = electricalValue(currentValue, "A") ?: return null
+        return String.format(Locale.US, "%.1f kW", abs(voltage * current) / 1000.0)
+    }
+
+    /**
+     * Formats the charging current for display as a non-negative value.
+     *
+     * The vehicle reports charging current with a negative sign in some states
+     * (for example, -8.299). The sign indicates direction and is not useful in
+     * the user-facing current field, so only the display value is normalized.
+     */
+    fun displayCurrent(status: JSONObject): String? = displayCurrent(status.opt("batteryCurrent"))
+
+    fun displayCurrent(values: Map<String, Any?>): String? = displayCurrent(values["batteryCurrent"])
+
+    private fun displayCurrent(value: Any?): String? {
+        if (value == null || value == JSONObject.NULL) return null
+        val raw = value.toString().trim()
+        if (raw.isBlank()) return null
+
+        val numericText = raw.removeSuffix("A").trim()
+        val numeric = numericText.toDoubleOrNull()
+        if (numeric == null || !numeric.isFinite()) return numericText
+        return if (numericText.startsWith("-")) numericText.removePrefix("-") else numericText
+    }
+
+    private fun power(state: Int?, voltageValue: Any?, currentValue: Any?): String? {
+        if (state != 1) return null
+        return electricalPower(voltageValue, currentValue)
+    }
+
+    private fun electricalValue(value: Any?, unit: String): Double? {
+        if (value == null || value == JSONObject.NULL) return null
+        return value
+            .toString()
+            .trim()
+            .removeSuffix(unit)
+            .trim()
+            .toDoubleOrNull()
+            ?.takeIf { it.isFinite() }
+    }
+
+    /** Formats duration only. Zero minutes is not evidence of charging completion. */
+    fun remainingTime(value: Any?): String? = remainingMinutes(value)?.let(::formatMinutes)
+
+    private fun remainingMinutes(value: Any?): Int? {
+        if (value == null || value == JSONObject.NULL) return null
+        val raw = value.toString().trim().removePrefix("约").trim()
+        val hours = HOUR_DURATION.matchEntire(raw)
+        val minutes = if (hours != null) {
+            val h = hours.groupValues[1].toDoubleOrNull() ?: return null
+            val m = hours.groupValues[2].takeIf { it.isNotEmpty() }?.toDoubleOrNull() ?: 0.0
+            if (m >= 60) return null
+            h * 60 + m
+        } else {
+            raw.removeSuffix("分钟").removeSuffix("分").trim().toDoubleOrNull() ?: return null
+        }
+        if (!minutes.isFinite() || minutes < 0) return null
+        return String.format(Locale.US, "%.0f", minutes).toIntOrNull()
+    }
+
+    private fun formatMinutes(minutes: Int): String = if (minutes < 60) "${minutes}分钟"
+        else "${minutes / 60}时${minutes % 60}分"
+
+    private val HOUR_DURATION = Regex("(\\d+)\\s*(?:小时|时)(?:\\s*(\\d+)\\s*(?:分钟|分))?")
+
+    fun type(status: JSONObject): String? = type(status.opt("dcInputFastCharge"))
+
+    fun type(values: Map<String, Any?>): String? = type(values["dcInputFastCharge"])
+
+    /**
+     * 判断当前是否已插上充电枪（包括交流慢充枪、直流快充枪、或处于充电工况中）。
+     */
+    fun isGunConnected(status: JSONObject?): Boolean {
+        if (status == null) return false
+        val ac = boolean(status.opt("acInputSlowCharge"))
+        val dc = boolean(status.opt("dcInputFastCharge"))
+        val s = state(status)
+        if (ac == false && dc == false) {
+            return s in setOf(1, 2, 6)
+        }
+        return ac == true || dc == true || s in setOf(1, 2, 4, 5, 6)
+    }
+
+    fun isGunConnected(values: Map<String, Any?>?): Boolean {
+        if (values == null) return false
+        val ac = boolean(values["acInputSlowCharge"])
+        val dc = boolean(values["dcInputFastCharge"])
+        val s = state(values)
+        if (ac == false && dc == false) {
+            return s in setOf(1, 2, 6)
+        }
+        return ac == true || dc == true || s in setOf(1, 2, 4, 5, 6)
+    }
+
+    private fun type(value: Any?): String? = when (boolean(value)) {
+        true -> "直流快充"
+        false -> "交流充电"
+        null -> null
+    }
+
+    /**
+     * `chargeState=2` is the verified service-side charging-complete state.
+     *
+     * Some vehicle variants can expose a non-zero `chargeCompleted` field while
+     * the reported charging state is still active. It is retained as decoded
+     * telemetry, but must not independently produce a completion notification.
+     * This describes session completion; use presentation for the full-battery label.
+     */
+    fun completed(status: JSONObject): Boolean = state(status) == 2
+
+    /**
+     * Determines whether the charging session completed for the configured power type.
+     *
+     * Range-extender vehicles expose fuel and combined range values in the 325x/326x
+     * group, but those values are not charging-completion signals. The charging
+     * notification must only follow the traction-battery state (1149/3736), just as
+     * it does for pure-electric vehicles.
+     */
+    fun completed(status: JSONObject, powerType: VehicleStatusMapper.PowerType?): Boolean =
+        when (powerType) {
+            VehicleStatusMapper.PowerType.RANGE_EXTENDER,
+            VehicleStatusMapper.PowerType.PURE_ELECTRIC,
+            null -> completed(status)
+        }
+
+    fun completed(values: Map<String, Any?>): Boolean = state(values) == 2
+
+    private fun state(value: Any?): Int? = value?.toString()?.toIntOrNull()
+
+    private fun boolean(value: Any?): Boolean? = when (value) {
+        is Boolean -> value
+        is Number -> value.toInt() != 0
+        is String -> when (value) {
+            "true", "1" -> true
+            "false", "0" -> false
+            else -> null
+        }
+        else -> null
+    }
+}
