@@ -1,0 +1,9 @@
+package com.leapauto.app
+
+object AppReleaseInfo {
+    val currentVersion: String
+        get() = BuildConfig.VERSION_NAME
+
+    // Update this text together with apkVersionName before each delivery package.
+    const val currentReleaseNotes = "1. 自动更新通道由蒲公英改为 GitHub 仓库（xiaojiekeji/chekong）的 Releases：只读取带 APK 资产的版本，可正常检查、下载、调起安装\n2. 仓库或版本被作者删除（HTTP 404）时不再报网络异常，而是给出「更新源已被作者删除」的可读提示；仓库尚未发布版本时按已是最新处理，不会误弹更新\n3. 「代码仓库」入口同步指向新仓库 https://github.com/xiaojiekeji/chekong"
+}
