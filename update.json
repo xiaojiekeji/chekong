@@ -1,0 +1,7 @@
+{
+  "versionName": "4.7.23",
+  "apkUrl": "https://github.com/xiaojiekeji/chekong/releases/download/v4.7.23/leapauto-4.7.23-debug.apk",
+  "pageUrl": "https://github.com/xiaojiekeji/chekong/releases/tag/v4.7.23",
+  "notes": "1. 「软件与关于」去掉「支持作者」入口及相关页面，只保留当前版本、开源代码仓库、退出账号\n2. 关闭 Chucker 常驻状态栏通知（不再常驻「Recording HTTP activity / 200 GET」）\n3. 更新下载增加国内镜像直链兜底（update.json 的 apkUrlMirror），并顺带修复更新清单版本",
+  "apkUrlMirror": "https://aka.doubaocdn.com/s/vaGm24EOUl"
+}
