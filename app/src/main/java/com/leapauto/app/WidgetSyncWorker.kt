@@ -1,0 +1,202 @@
+package com.leapauto.app
+
+import android.appwidget.AppWidgetManager
+import android.content.ComponentName
+import android.content.Context
+import android.widget.RemoteViews
+import androidx.work.Worker
+import androidx.work.WorkerParameters
+import com.leapauto.app.trip.TripReconciliationEngine
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+/** Performs widget network synchronization outside the AppWidgetProvider receiver window. */
+class WidgetSyncWorker(appContext: Context, workerParams: WorkerParameters) :
+    Worker(appContext, workerParams) {
+
+    override fun doWork(): Result {
+        val context = applicationContext
+        val requestWasDriving = inputData.getBoolean(KEY_DRIVING_SYNC, false)
+        val manager = AppWidgetManager.getInstance(context)
+        val controlWidgetIds = manager.getAppWidgetIds(ComponentName(context, ControlWidget::class.java))
+        val compactWidgetIds = manager.getAppWidgetIds(ComponentName(context, CompactControlWidget::class.java))
+        if (controlWidgetIds.isEmpty() && compactWidgetIds.isEmpty()) return Result.success()
+
+        val store = SessionStore(context)
+        var session: Session? = null
+        return try {
+            val current = store.load()
+            session = current
+            if (current.oldAuth == null || current.newAuth == null || current.selectedVin.isBlank()) {
+                val fullViews = ControlWidget.baseViews(context)
+                ControlWidget.applyTopRightStatus(context, fullViews, "打开 App 登录", locked = null, driving = null)
+                ControlWidget.updateSyncCadence(context, null)
+                updateWidgets(store, manager, controlWidgetIds, compactWidgetIds, fullViews, partial = false)
+            } else {
+                val config = store.loadVehicleConfig(current.selectedVin)
+                val status = LeapmotorApi(current).getVehicleState()
+                ChargeNotificationManager.process(context, store, current.selectedVin, status)
+                // [FEATURE: TRIP_LOG] Start
+                try {
+                    val rawMileage = status.opt("totalMileage") ?: status.opt("1318")
+                    val mileageKm = rawMileage?.toString()?.toDoubleOrNull()
+                    val rawSoc = status.opt("preciseSoc")
+                        ?: status.opt("100003")
+                        ?: status.opt("soc")
+                        ?: status.opt("1204")
+                    val socPercent = rawSoc?.toString()?.trim()?.removeSuffix("%")?.toDoubleOrNull()
+                    val isDriving = WidgetStatusMapper.isDriving(status)
+                    val gear = status.optString("gearStatus").takeIf { it.isNotBlank() }
+                        ?: status.optString("1010").takeIf { it.isNotBlank() }
+                    val fuelSocPercent = VehicleStatusMapper.fuelSocPercent(status)?.toDouble()
+                    TripReconciliationEngine.processTelemetry(
+                        context = context,
+                        vin = current.selectedVin,
+                        mileageKm = mileageKm,
+                        socPercent = socPercent,
+                        isDriving = isDriving,
+                        gear = gear,
+                        locationName = null,
+                        carType = current.selectedCarType,
+                        fuelSocPercent = fuelSocPercent
+                    )
+                } catch (_: Exception) {}
+                // [FEATURE: TRIP_LOG] End
+
+                val workerPowerType = VehiclePowerTypeResolver.fromStatus(
+                    status, config.powerType, current.selectedCarType
+                )
+                val powerType = workerPowerType.toStatusPowerType()
+                val partialViews = RemoteViews(context.packageName, R.layout.widget_layout)
+                ControlWidget.renderStatus(context, partialViews, status, current.selectedCarType, partial = true)
+                store.save(current)
+                val updated = formatUpdatedTime()
+                ControlWidget.applyTopRightStatus(
+                    context,
+                    partialViews,
+                    updated,
+                    locked = store.resolveEffectiveLock(current.selectedVin, WidgetStatusMapper.locked(status)),
+                    driving = WidgetStatusMapper.isDriving(status)
+                )
+                store.saveWidgetSnapshot(
+                    vin = current.selectedVin,
+                    carType = current.selectedCarType,
+                    range = VehicleStatusMapper.widgetRange(status, session.selectedCarType, powerType) ?: "--",
+                    soc = VehicleStatusMapper.electricSocPercent(status)
+                        ?: VehicleStatusMapper.soc(status),
+                    fuelSoc = VehicleStatusMapper.fuelSocPercent(status),
+                    updated = updated,
+                    powerType = workerPowerType,
+                    electricRange = VehicleStatusMapper.electricRemainingRange(status),
+                    fuelRange = VehicleStatusMapper.fuelRemainingRange(status),
+                    electricTotalRange = VehicleStatusMapper.electricTotalRange(status),
+                    fuelTotalRange = VehicleStatusMapper.fuelTotalRange(status),
+                    statusLabel = WidgetStatusMapper.label(status, session.selectedCarType).orEmpty(),
+                    locked = store.resolveEffectiveLock(current.selectedVin, WidgetStatusMapper.locked(status)),
+                    acEnabled = WidgetAcMapper.state(status),
+                    acTone = ClimateTemperatureToneResolver.tone(
+                        acEnabled = WidgetAcMapper.state(status),
+                        coolingAndHeating = status.optInt("acCoolingAndHeating", status.optInt("coolingAndHeating", -1)).takeIf { it != -1 },
+                        climateMode = status.optInt("climateMode", -1).takeIf { it != -1 },
+                        targetTemperature = status.opt("acSetting")?.toString()?.toIntOrNull()
+                    ),
+                    chargingPower = ChargeStatus.power(status),
+                    chargeState = ChargeStatus.state(status),
+                    chargeSoc = ChargeStatus.socPercent(status.opt("soc")),
+                    chargeRemainTime = ChargeStatus.remainingTime(status.opt("chargeRemainTime")),
+                    driving = WidgetStatusMapper.isDriving(status),
+                    capturedAt = System.currentTimeMillis(),
+                    lastSuccessAt = System.currentTimeMillis(),
+                    sessionGeneration = current.generation,
+                    trunkState = TrunkStateMapper.fromSignal(status.opt("bbcmBackDoorStatus")),
+                    sentryEnabled = WidgetSentryMapper.state(status),
+                    windowOpen = WidgetStatusMapper.openWindowLabels(status, current.selectedCarType).isNotEmpty()
+                )
+                ControlWidget.updateSyncCadence(
+                    context = context,
+                    driving = WidgetStatusMapper.isDriving(status),
+                    rescheduleAfterCurrentSync = true
+                )
+                updateWidgets(store, manager, controlWidgetIds, compactWidgetIds, partialViews, partial = true)
+            }
+            Result.success()
+        } catch (error: Exception) {
+            val terminalAuthFailure = error is ApiException &&
+                (SessionExpiry.isRefreshTokenInvalid(error.message) || error.httpStatus in setOf(401, 403))
+            if (terminalAuthFailure) {
+                store.invalidateWidgetSnapshot()
+                val fullViews = ControlWidget.baseViews(context)
+                ControlWidget.applyTopRightStatus(context, fullViews, "请打开App登录", locked = null, driving = null)
+                ControlWidget.updateSyncCadence(context, null)
+                updateWidgets(store, manager, controlWidgetIds, compactWidgetIds, fullViews, partial = false)
+                return Result.success()
+            }
+            val snapshot = session?.let { current -> store.loadWidgetSnapshot(current.selectedVin) }
+            val continueDrivingCadence = WidgetSyncCadencePolicy.shouldContinueDrivingCadence(
+                requestWasDriving = requestWasDriving,
+                lastKnownDriving = snapshot?.driving
+            )
+            if (snapshot != null) {
+                // Preserve the last known-good data and timestamp on transient failures.
+                val partialViews = RemoteViews(context.packageName, R.layout.widget_layout)
+                ControlWidget.renderSnapshot(context, partialViews, snapshot, partial = true)
+                ControlWidget.updateSyncCadence(
+                    context,
+                    continueDrivingCadence,
+                    rescheduleAfterCurrentSync = true
+                )
+                updateWidgets(store, manager, controlWidgetIds, compactWidgetIds, partialViews, partial = true)
+            } else {
+                val fullViews = ControlWidget.baseViews(context)
+                ControlWidget.applyTopRightStatus(
+                    context,
+                    fullViews,
+                    if (continueDrivingCadence) "正在重试" else "同步失败",
+                    locked = null,
+                    driving = null
+                )
+                ControlWidget.updateSyncCadence(
+                    context,
+                    continueDrivingCadence,
+                    rescheduleAfterCurrentSync = true
+                )
+                updateWidgets(store, manager, controlWidgetIds, compactWidgetIds, fullViews, partial = false)
+            }
+            Result.success()
+        }
+    }
+
+    private fun updateWidgets(
+        store: SessionStore,
+        manager: AppWidgetManager,
+        controlWidgetIds: IntArray,
+        compactWidgetIds: IntArray,
+        views: RemoteViews,
+        partial: Boolean = true
+    ) {
+        store.suppressWidgetSyncFor(SUPPRESS_ECHO_WINDOW_MILLIS)
+        if (controlWidgetIds.isNotEmpty()) {
+            if (partial) {
+                manager.partiallyUpdateAppWidget(controlWidgetIds, views)
+            } else {
+                manager.updateAppWidget(controlWidgetIds, views)
+            }
+        }
+        if (compactWidgetIds.isNotEmpty()) {
+            if (partial) {
+                manager.partiallyUpdateAppWidget(compactWidgetIds, CompactControlWidget.partialViews(applicationContext))
+            } else {
+                manager.updateAppWidget(compactWidgetIds, CompactControlWidget.baseViews(applicationContext))
+            }
+        }
+    }
+
+    private fun formatUpdatedTime(): String =
+        SimpleDateFormat("'今天' HH:mm'更新'", Locale.CHINA).format(Date())
+
+    companion object {
+        internal const val KEY_DRIVING_SYNC = "widget_driving_sync"
+        private const val SUPPRESS_ECHO_WINDOW_MILLIS = 10_000L
+    }
+}

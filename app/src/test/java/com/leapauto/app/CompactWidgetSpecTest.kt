@@ -1,0 +1,461 @@
+package com.leapauto.app
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.File
+import javax.xml.parsers.DocumentBuilderFactory
+
+class CompactWidgetSpecTest {
+
+    @Test
+    fun `widget neutral surfaces have no blue tint in either theme`() {
+        val resources = File(projectDirectory(), "app/src/main/res")
+        val surfaces = resources.walkTopDown().filter { file ->
+            file.extension == "xml" && listOf(
+                "widget_card_background", "widget_action_background", "widget_compact_action_neutral"
+            ).any { file.name.startsWith(it) }
+        }.toList()
+        assertTrue(surfaces.isNotEmpty())
+        surfaces.forEach { file ->
+            literalColors(file).forEach { color ->
+                val rgb = color.takeLast(6).toInt(16)
+                assertEquals(file.name, (rgb shr 16) and 255, (rgb shr 8) and 255)
+                assertEquals(file.name, (rgb shr 8) and 255, rgb and 255)
+            }
+        }
+        listOf("values", "values-night").forEach { directory ->
+            val colors = File(resources, "$directory/colors.xml").readText()
+            assertTrue(colors.contains("name=\"action_neutral\""))
+            assertTrue(!colors.contains("leap_blue"))
+        }
+    }
+
+    @Test
+    fun `confirmed cooling and ventilation use green while inactive controls remain neutral`() {
+        val resources = File(projectDirectory(), "app/src/main/res")
+        listOf("light", "dark").forEach { theme ->
+            val active = File(resources, "drawable/widget_compact_action_primary_$theme.xml")
+            literalColors(active).forEach { color ->
+                val rgb = color.takeLast(6).toInt(16)
+                val green = (rgb shr 8) and 255
+                assertTrue(green > ((rgb shr 16) and 255))
+                assertTrue(green > (rgb and 255))
+            }
+        }
+        val provider = File(
+            projectDirectory(), "app/src/main/java/com/leapauto/app/CompactControlWidget.kt"
+        ).readText()
+        assertTrue(provider.contains("!presentation.showEnabledIcon -> CompactActionTone.NEUTRAL"))
+        assertTrue(provider.contains("presentation.tone == ClimateTemperatureTone.HEATING -> CompactActionTone.HEATING"))
+        assertTrue(provider.contains("else -> CompactActionTone.ACTIVE"))
+        val coolingIcon = File(resources, "drawable/ic_widget_ac_snowflake_cooling.xml").readText()
+        assertTrue(coolingIcon.contains("@color/energy_green"))
+    }
+
+    @Test
+    fun `normal widget range gradients use green without a blue starting point`() {
+        listOf("widget_charge_progress.xml", "widget_pure_range_progress.xml").forEach { name ->
+            val file = File(projectDirectory(), "app/src/main/res/drawable/$name")
+            literalColors(file).forEach { color ->
+                val rgb = color.takeLast(6).toInt(16)
+                val green = (rgb shr 8) and 255
+                assertTrue(green > ((rgb shr 16) and 255))
+                assertTrue(green > (rgb and 255))
+            }
+        }
+    }
+
+    private fun literalColors(file: File): List<String> {
+        val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(file)
+        val elements = document.getElementsByTagName("*")
+        return (0 until elements.length).flatMap { index ->
+            val attributes = elements.item(index).attributes
+            (0 until attributes.length).map { attributes.item(it).nodeValue }
+        }.filter { it.matches(Regex("#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?")) }
+    }
+
+    @Test
+    fun `compact widget is registered as a fixed two by two provider`() {
+        val projectDir = projectDirectory()
+        val manifest = File(projectDir, "app/src/main/AndroidManifest.xml").readText()
+        val provider = File(
+            projectDir,
+            "app/src/main/res/xml/compact_appwidget_provider_info.xml"
+        ).readText()
+        val provider31 = File(
+            projectDir,
+            "app/src/main/res/xml-v31/compact_appwidget_provider_info.xml"
+        ).readText()
+
+        assertTrue(manifest.contains("android:name=\".CompactControlWidget\""))
+        assertTrue(manifest.contains("android:resource=\"@xml/compact_appwidget_provider_info\""))
+        assertTrue(manifest.contains("android:name=\"android.intent.action.CONFIGURATION_CHANGED\""))
+        assertTrue(manifest.contains("android:name=\"android.intent.action.MY_PACKAGE_REPLACED\""))
+        assertTrue(provider.contains("android:resizeMode=\"none\""))
+        assertTrue(provider.contains("android:initialLayout=\"@layout/widget_compact_layout\""))
+        assertTrue(provider31.contains("android:targetCellWidth=\"2\""))
+        assertTrue(provider31.contains("android:targetCellHeight=\"2\""))
+    }
+
+    @Test
+    fun `wide widget is registered with compact 90dp minimum height and horizontal vertical resize support`() {
+        val projectDir = projectDirectory()
+        val manifest = File(projectDir, "app/src/main/AndroidManifest.xml").readText()
+        val provider = File(
+            projectDir,
+            "app/src/main/res/xml/appwidget_provider_info.xml"
+        ).readText()
+        val provider31 = File(
+            projectDir,
+            "app/src/main/res/xml-v31/appwidget_provider_info.xml"
+        ).readText()
+        val layout = File(
+            projectDir,
+            "app/src/main/res/layout/widget_layout.xml"
+        ).readText()
+
+        assertTrue(manifest.contains("android:name=\".ControlWidget\""))
+        assertTrue(manifest.contains("android:resource=\"@xml/appwidget_provider_info\""))
+        assertTrue(provider.contains("android:minHeight=\"90dp\""))
+        assertTrue(provider.contains("android:resizeMode=\"horizontal|vertical\""))
+        assertTrue(provider.contains("android:initialLayout=\"@layout/widget_layout\""))
+        assertTrue(provider31.contains("android:targetCellWidth=\"4\""))
+        assertTrue(provider31.contains("android:targetCellHeight=\"2\""))
+        assertTrue(provider31.contains("android:minHeight=\"90dp\""))
+        assertTrue(layout.contains("android:id=\"@+id/widgetActionRow\""))
+        assertTrue(layout.contains("android:id=\"@+id/widgetBackgroundImg\""))
+        assertTrue(layout.contains("android:layout_marginTop=\"8dp\""))
+        assertTrue(layout.contains("android:layout_marginBottom=\"8dp\""))
+        assertTrue(layout.contains("android:id=\"@+id/imgWCar\""))
+        assertTrue(layout.contains("android:layout_weight=\"1.15\""))
+        assertTrue(layout.contains("android:layout_weight=\"0.85\""))
+    }
+
+    @Test
+    fun `compact layout exposes range lock and air conditioner controls without manual refresh`() {
+        val layout = File(
+            projectDirectory(),
+            "app/src/main/res/layout/widget_compact_layout.xml"
+        ).readText()
+        val provider = File(
+            projectDirectory(),
+            "app/src/main/java/com/leapauto/app/CompactControlWidget.kt"
+        ).readText()
+
+        assertTrue(!layout.contains("android:id=\"@+id/btnWCRefresh\""))
+        assertTrue(!provider.contains("ACTION_REFRESH"))
+        assertTrue(!provider.contains("refreshPendingIntent"))
+        assertTrue(layout.contains("android:id=\"@+id/imgWCCar\""))
+        assertTrue(layout.contains("android:id=\"@+id/txtWCTitle\""))
+        assertTrue(layout.contains("android:id=\"@+id/compactHybridRange\""))
+        assertTrue(layout.contains("android:id=\"@+id/txtWCElectricRange\""))
+        assertTrue(layout.contains("android:id=\"@+id/txtWCElectricSoc\""))
+        assertTrue(layout.contains("android:id=\"@+id/txtWCFuelRange\""))
+        assertTrue(layout.contains("android:id=\"@+id/txtWCFuelSoc\""))
+        assertTrue(!layout.contains("android:id=\"@+id/progressWCElectric\""))
+        assertTrue(!layout.contains("android:id=\"@+id/progressWCFuel\""))
+        assertTrue(!layout.contains("android:id=\"@+id/progressWCNormal\""))
+        assertTrue(layout.contains("android:id=\"@+id/compactRangeContainer\""))
+        assertTrue(layout.contains("android:id=\"@+id/txtWCRange\""))
+        assertTrue(layout.contains("android:id=\"@+id/txtWCSocValue\""))
+        assertTrue(layout.contains("android:id=\"@+id/btnWCLock\""))
+        assertTrue(layout.contains("android:id=\"@+id/btnWCAc\""))
+        assertTrue(layout.contains("android:layout_height=\"44dp\""))
+        assertTrue(layout.contains("android:maxLines=\"1\""))
+    }
+
+    @Test
+    fun `compact action surfaces are visually inset while keeping their full click containers`() {
+        val projectDir = projectDirectory()
+        val layout = File(projectDir, "app/src/main/res/layout/widget_compact_layout.xml").readText()
+        val neutral = File(projectDir, "app/src/main/res/drawable/widget_compact_action_neutral.xml").readText()
+        val success = File(projectDir, "app/src/main/res/drawable/widget_compact_action_success.xml").readText()
+        val primary = File(projectDir, "app/src/main/res/drawable/widget_compact_action_primary.xml").readText()
+
+        assertTrue(layout.contains("android:layout_height=\"44dp\""))
+        listOf(neutral, success, primary).forEach { drawable ->
+            assertTrue(drawable.contains("android:insetLeft=\"4dp\""))
+            assertTrue(drawable.contains("android:insetTop=\"4dp\""))
+            assertTrue(drawable.contains("android:insetRight=\"4dp\""))
+            assertTrue(drawable.contains("android:insetBottom=\"4dp\""))
+        }
+    }
+
+    @Test
+    fun `opaque and translucent widget backgrounds share the same rounded corners`() {
+        val drawableDirectory = File(projectDirectory(), "app/src/main/res/drawable")
+        listOf(
+            "widget_card_background.xml",
+            "widget_card_background_25.xml",
+            "widget_card_background_50.xml",
+            "widget_card_background_75.xml"
+        ).forEach { fileName ->
+            val drawable = File(drawableDirectory, fileName).readText()
+            assertTrue(drawable.contains("<corners android:radius=\"20dp\" />"))
+        }
+    }
+
+    @Test
+    fun `wide widget no longer reserves or renders a brand logo`() {
+        val projectDir = projectDirectory()
+        val layout = File(projectDir, "app/src/main/res/layout/widget_layout.xml").readText()
+        val controlWidget = File(projectDir, "app/src/main/java/com/leapauto/app/ControlWidget.kt").readText()
+
+        assertTrue(!layout.contains("imgWBrandLogo"))
+        assertTrue(!controlWidget.contains("imgWBrandLogo"))
+        assertTrue(!controlWidget.contains("setVehicleBrandLogo"))
+    }
+
+    @Test
+    fun `wide widget marks an open window with coordinated alert red status text`() {
+        val projectDir = projectDirectory()
+        val layout = File(projectDir, "app/src/main/res/layout/widget_layout.xml").readText()
+        val controlWidget = File(projectDir, "app/src/main/java/com/leapauto/app/ControlWidget.kt").readText()
+        val colors = File(projectDir, "app/src/main/res/values/colors.xml").readText()
+
+        assertFalse(layout.contains("android:id=\"@+id/txtWWindowWarning\""))
+        assertFalse(controlWidget.contains("R.id.txtWWindowWarning"))
+        assertTrue(controlWidget.contains("text == \"车窗未关闭\" -> R.color.alert_red"))
+        assertTrue(colors.contains("name=\"alert_red\""))
+    }
+
+    @Test
+    fun `both widget providers share one worker and preserve cadence while either remains`() {
+        val projectDir = projectDirectory()
+        val worker = File(
+            projectDir,
+            "app/src/main/java/com/leapauto/app/WidgetSyncWorker.kt"
+        ).readText()
+        val controlWidget = File(
+            projectDir,
+            "app/src/main/java/com/leapauto/app/ControlWidget.kt"
+        ).readText()
+        val compactWidget = File(
+            projectDir,
+            "app/src/main/java/com/leapauto/app/CompactControlWidget.kt"
+        ).readText()
+
+        assertTrue(worker.contains("ComponentName(context, ControlWidget::class.java)"))
+        assertTrue(worker.contains("ComponentName(context, CompactControlWidget::class.java)"))
+        assertTrue(worker.contains("CompactControlWidget.baseViews(applicationContext)"))
+        assertTrue(controlWidget.contains("if (!CompactControlWidget.hasInstances(context))"))
+        assertTrue(compactWidget.contains("if (!ControlWidget.hasInstances(context))"))
+        assertTrue(compactWidget.contains("ControlWidget.click(context, it)"))
+    }
+
+    @Test
+    fun `app appearance changes immediately rebind both widgets with explicit theme resources`() {
+        val projectDir = projectDirectory()
+        val activity = File(projectDir, "app/src/main/java/com/leapauto/app/MainActivity.kt").readText().replace("\r\n", "\n")
+        val wideWidget = File(projectDir, "app/src/main/java/com/leapauto/app/ControlWidget.kt").readText()
+        val compactWidget = File(projectDir, "app/src/main/java/com/leapauto/app/CompactControlWidget.kt").readText()
+
+        assertTrue(activity.contains("sessionStore.saveAppearanceMode(mode)\n        ControlWidget.refreshAppearance(this)"))
+        assertTrue(wideWidget.contains("SessionStore(context).loadAppearanceMode().resolvesToDark(systemDark)"))
+        assertTrue(wideWidget.contains("CompactControlWidget.refreshAppearance(context)"))
+        assertTrue(wideWidget.contains("widget_card_background_landscape_light"))
+        assertTrue(wideWidget.contains("widget_card_background_landscape_dark"))
+        assertTrue(wideWidget.contains("widget_action_background_light"))
+        assertTrue(wideWidget.contains("widget_action_background_dark"))
+        assertTrue(compactWidget.contains("ControlWidget.widgetThemeContext(context)"))
+        assertTrue(compactWidget.contains("widget_compact_action_neutral_light"))
+        assertTrue(compactWidget.contains("widget_compact_action_neutral_dark"))
+        assertTrue(wideWidget.contains("setImageTint(views, id, actionIcon)"))
+        assertTrue(wideWidget.contains("views.setInt(id, \"setBackgroundResource\", actionBackground)"))
+        assertTrue(compactWidget.contains("ControlWidget.setImageTint(views, R.id.imgWCAcOff, actionColor)"))
+        assertTrue(compactWidget.contains("ControlWidget.setImageTint(views, R.id.imgWCLock, iconColor)"))
+    }
+
+    @Test
+    fun `app replacement refreshes existing widget remote views`() {
+        val projectDir = projectDirectory()
+        val controlWidget = File(
+            projectDir,
+            "app/src/main/java/com/leapauto/app/ControlWidget.kt"
+        ).readText()
+
+        assertTrue(controlWidget.contains("Intent.ACTION_MY_PACKAGE_REPLACED"))
+        assertTrue(controlWidget.contains("refreshData(context)"))
+        assertTrue(controlWidget.contains("enqueueSync(context)"))
+    }
+
+    @Test
+    fun `high transparency keeps range text and progress bars readable`() {
+        val projectDir = projectDirectory()
+        val wideLayout = File(projectDir, "app/src/main/res/layout/widget_layout.xml").readText()
+        val compactLayout = File(projectDir, "app/src/main/res/layout/widget_compact_layout.xml").readText()
+        val wideWidget = File(projectDir, "app/src/main/java/com/leapauto/app/ControlWidget.kt").readText()
+        val compactWidget = File(projectDir, "app/src/main/java/com/leapauto/app/CompactControlWidget.kt").readText()
+        val lightColors = File(projectDir, "app/src/main/res/values/colors.xml").readText()
+        val darkColors = File(projectDir, "app/src/main/res/values-night/colors.xml").readText()
+
+        assertTrue(wideWidget.contains("applyProgressAppearance(context, views, false)"))
+        assertTrue(compactWidget.contains("applyProgressAppearance(context, views, false)"))
+        assertTrue(wideWidget.contains("widget_range_good_high_contrast"))
+        assertTrue(compactWidget.contains("widget_range_track_high_contrast"))
+        assertTrue(wideLayout.contains("android:shadowColor=\"@color/widget_text_shadow\""))
+        assertTrue(compactLayout.contains("android:shadowColor=\"@color/widget_text_shadow\""))
+        listOf(lightColors, darkColors).forEach { colors ->
+            assertTrue(colors.contains("widget_on_surface_high_contrast"))
+            assertTrue(colors.contains("widget_range_track_high_contrast"))
+            assertTrue(colors.contains("widget_range_good_high_contrast"))
+            assertTrue(colors.contains("widget_text_shadow"))
+            assertTrue(colors.contains("widget_card_border"))
+        }
+    }
+
+    @Test
+    fun `widget text shadow is transparent to prevent fuzzy blurred text in both light and dark modes`() {
+        val projectDir = projectDirectory()
+        val lightColors = File(projectDir, "app/src/main/res/values/colors.xml").readText()
+        val darkColors = File(projectDir, "app/src/main/res/values-night/colors.xml").readText()
+
+        listOf(lightColors, darkColors).forEach { colors ->
+            assertTrue(
+                "widget_text_shadow 必须为 #00000000 透明色以消除文字发糊与漫反射黑晕",
+                colors.contains("<color name=\"widget_text_shadow\">#00000000</color>")
+            )
+        }
+    }
+
+    @Test
+    fun `compact pure electric and fuel progress bars share the same geometry`() {
+        val projectDir = projectDirectory()
+        val layout = File(projectDir, "app/src/main/res/layout/widget_compact_layout.xml").readText()
+        val electric = File(
+            projectDir,
+            "app/src/main/res/drawable/widget_pure_range_progress.xml"
+        ).readText()
+        val fuel = File(
+            projectDir,
+            "app/src/main/res/drawable/widget_compact_fuel_range_progress.xml"
+        ).readText()
+
+        assertTrue(layout.contains("android:id=\"@+id/imgWCCar\""))
+        assertTrue(layout.contains("android:id=\"@+id/compactHybridRange\""))
+        assertTrue(layout.contains("android:id=\"@+id/txtWCElectricRange\""))
+        assertTrue(layout.contains("android:id=\"@+id/txtWCFuelRange\""))
+        listOf(electric, fuel).forEach { drawable ->
+            assertTrue(drawable.contains("android:id=\"@android:id/background\""))
+            assertTrue(drawable.contains("android:shape=\"rectangle\""))
+            assertTrue(drawable.contains("<corners android:radius=\"2dp\" />"))
+        }
+    }
+
+    @Test
+    fun `widget car bitmap scaling sizes car with refined 0_82f scale ratio and high definition filter`() {
+        val projectDir = projectDirectory()
+        val controlWidget = File(projectDir, "app/src/main/java/com/leapauto/app/ControlWidget.kt").readText()
+
+        assertTrue(controlWidget.contains("scaleRatio: Float = 0.82f"))
+        assertTrue(controlWidget.contains("targetWidth: Int = 680"))
+        assertTrue(controlWidget.contains("val carW = (canvasW * scaleRatio).toInt()"))
+        assertTrue(controlWidget.contains("canvas.drawBitmap(scaledCar, left, top, paint)"))
+    }
+
+    @Test
+    fun `both widgets load car image through widget priority cache`() {
+        val projectDir = projectDirectory()
+        val wideWidget = File(projectDir, "app/src/main/java/com/leapauto/app/ControlWidget.kt").readText()
+        val compactWidget = File(projectDir, "app/src/main/java/com/leapauto/app/CompactControlWidget.kt").readText()
+
+        assertTrue(wideWidget.contains("VehicleImageCache.loadWidgetBitmap(context, vin)"))
+        assertTrue(compactWidget.contains("VehicleImageCache.loadWidgetBitmap(context, vin)"))
+    }
+
+    @Test
+    fun `health check bottom sheet loads car image consistent with widget image logic`() {
+        val projectDir = projectDirectory()
+        val screenSource = File(projectDir, "app/src/main/java/com/leapauto/app/ui/LeapAutoScreen.kt").readText()
+        val sheetSource = File(projectDir, "app/src/main/java/com/leapauto/app/ui/VehicleHealthCheckBottomSheet.kt").readText()
+
+        assertTrue(screenSource.contains("VehicleImageCache.loadWidgetBitmap(context, vehicleVin)"))
+        assertTrue(sheetSource.contains("VehicleImageCache.loadWidgetBitmap(context, vehicleVin)"))
+    }
+
+    @Test
+    fun `widget card background supports landscape skybox style option`() {
+        val projectDir = projectDirectory()
+        val controlWidget = File(projectDir, "app/src/main/java/com/leapauto/app/ControlWidget.kt").readText()
+
+        assertTrue(controlWidget.contains("WIDGET_BG_STYLE_MICROCRYSTAL"))
+        assertTrue(controlWidget.contains("WIDGET_BG_STYLE_LANDSCAPE"))
+        assertTrue(controlWidget.contains("widget_card_background_dark"))
+        assertTrue(controlWidget.contains("widget_card_background_light"))
+        assertTrue(controlWidget.contains("widget_card_background_landscape_dark"))
+        assertTrue(controlWidget.contains("widget_card_background_landscape_light"))
+    }
+
+    @Test
+    fun `settings screen provides widget background style selection card`() {
+        val projectDir = projectDirectory()
+        val screen = File(projectDir, "app/src/main/java/com/leapauto/app/ui/LeapAutoScreen.kt").readText()
+
+        assertTrue(screen.contains("WidgetBackgroundStyleCard"))
+        assertTrue(screen.contains("小组件背景风格"))
+        assertTrue(screen.contains("经典微晶"))
+        assertTrue(screen.contains("官方山河"))
+        assertTrue(screen.contains("if (selectedThemeId == ThemeManager.ORIGINAL_SKYBOX_THEME_ID) {"))
+    }
+
+    @Test
+    fun `control widget maps opacity resources for microcrystal style`() {
+        val projectDir = projectDirectory()
+        val controlWidget = File(projectDir, "app/src/main/java/com/leapauto/app/ControlWidget.kt").readText()
+
+        assertTrue(controlWidget.contains("widgetBackgroundResource"))
+        assertTrue(controlWidget.contains("widget_card_background_75_dark"))
+        assertTrue(controlWidget.contains("widget_card_background_50_dark"))
+        assertTrue(controlWidget.contains("widget_card_background_25_dark"))
+        assertTrue(controlWidget.contains("widget_card_background_75_light"))
+        assertTrue(controlWidget.contains("widget_card_background_50_light"))
+        assertTrue(controlWidget.contains("widget_card_background_25_light"))
+    }
+
+    @Test
+    fun `settings screen displays widget opacity card only when microcrystal style selected`() {
+        val projectDir = projectDirectory()
+        val screen = File(projectDir, "app/src/main/java/com/leapauto/app/ui/LeapAutoScreen.kt").readText()
+
+        assertTrue(screen.contains("WidgetOpacityCard"))
+        assertTrue(screen.contains("小组件透明度"))
+        assertTrue(screen.contains("widgetBackgroundStyle == SessionStore.WIDGET_BG_STYLE_MICROCRYSTAL"))
+    }
+
+    @Test
+    fun `widget layouts provide dedicated background imageview layers for reliable theme and opacity application`() {
+        val projectDir = projectDirectory()
+        val wideLayout = File(projectDir, "app/src/main/res/layout/widget_layout.xml").readText()
+        val compactLayout = File(projectDir, "app/src/main/res/layout/widget_compact_layout.xml").readText()
+        val wideWidget = File(projectDir, "app/src/main/java/com/leapauto/app/ControlWidget.kt").readText()
+        val compactWidget = File(projectDir, "app/src/main/java/com/leapauto/app/CompactControlWidget.kt").readText()
+
+        assertTrue(wideLayout.contains("android:id=\"@+id/widgetBackgroundImg\""))
+        assertTrue(compactLayout.contains("android:id=\"@+id/compactWidgetBackgroundImg\""))
+        assertTrue(wideWidget.contains("setImageViewResource(R.id.widgetBackgroundImg, bgRes)"))
+        assertTrue(compactWidget.contains("setImageViewResource(R.id.compactWidgetBackgroundImg, bgRes)"))
+    }
+
+    @Test
+    fun `session store defaults widget background style to landscape`() {
+        assertEquals(SessionStore.WIDGET_BG_STYLE_LANDSCAPE, SessionStore.WIDGET_BG_STYLE_DEFAULT)
+    }
+
+    @Test
+    fun `transparent microcrystal mode switches unit and updated time to black high contrast in light mode`() {
+        val projectDir = projectDirectory()
+        val controlWidget = File(projectDir, "app/src/main/java/com/leapauto/app/ControlWidget.kt").readText()
+
+        assertTrue(controlWidget.contains("fun isTransparentMicrocrystal(context: Context): Boolean"))
+        assertTrue(controlWidget.contains("bgStyle == SessionStore.WIDGET_BG_STYLE_MICROCRYSTAL && opacity == 25"))
+        assertTrue(controlWidget.contains("R.color.widget_on_surface_high_contrast"))
+    }
+
+    private fun projectDirectory(): File {
+        val workingDirectory = requireNotNull(System.getProperty("user.dir"))
+        return generateSequence(File(workingDirectory)) { it.parentFile }
+            .first { File(it, "app").isDirectory }
+    }
+}
